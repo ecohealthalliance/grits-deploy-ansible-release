@@ -1,0 +1,107 @@
+---
+
+  - name: Sync diagnostic dashboard code
+    git: 
+      repo: git@github.com:ecohealthalliance/grits-diagnostic-dashboard-release.git
+      dest: "{{ diagnostic_dashboard_prefix }}"
+      accept_hostkey: yes
+      version: "{{ diagnostic_dashboard_git_version }}"
+    register: dashboard
+
+  - name: Remove meteor
+    file: path=/usr/local/bin/meteor state=absent
+    when: dashboard.changed
+
+  - name: Install meteor
+    shell: curl https://install.meteor.com | /bin/sh chdir=/tmp creates=/usr/local/bin/meteor
+    sudo: yes
+    when: dashboard.changed
+  
+  - name: Remove untracked files in dashboard directory
+    shell: "git clean -f"
+    args:
+      chdir: "{{ diagnostic_dashboard_prefix }}"
+    when: dashboard.changed
+
+  - name: Create config
+    template: src=config.j2 dest={{ diagnostic_dashboard_prefix }}/config mode=0755
+    when: dashboard.changed
+
+  - name: Remove bundle directory
+    file: path={{ diagnostic_dashboard_prefix }}/bundle state=absent
+    when: dashboard.changed
+
+  - name: meteor bundle
+    command: meteor bundle bundle.tgz chdir={{ diagnostic_dashboard_prefix }}
+    when: dashboard.changed
+
+  - name: Unarchive bundle
+    unarchive: src={{ diagnostic_dashboard_prefix }}/bundle.tgz dest={{ diagnostic_dashboard_prefix }} copy=no
+    when: dashboard.changed
+
+  - name: Install npm modules
+    command: npm install
+    args:
+      chdir: "{{ diagnostic_dashboard_prefix }}/bundle/programs/server"
+
+  - name: Install supervisord config
+    template: src=dashboardd.conf.j2 dest=/etc/supervisor/conf.d/dashboardd.conf
+    sudo: yes
+    notify: reload supervisor
+    with_items:
+      - dashboard
+
+  - name: Install postfix main config
+    template: src=postfix_main.cf.j2 dest=/etc/postfix/main.cf
+    sudo: yes
+
+  - name: Install postfix master config
+    template: src=postfix_master.cf.j2 dest=/etc/postfix/master.cf
+    sudo: yes
+
+  - name: Install postfix transport
+    template: src=postfix_transport.j2 dest=/etc/postfix/transport
+    sudo: yes
+
+  - name: Install postfix aliases
+    template: src=postfix_alias.j2 dest=/etc/postfix/virtual_alias
+    sudo: yes
+
+  - name: Install postfix access
+    template: src=postfix_access.j2 dest=/etc/postfix/access
+    sudo: yes
+
+  - name: Install script to pipe mail to dashboard
+    template: src=postfix_gritsmail.sh.j2 dest=/etc/postfix/gritsmail.sh group={{ grits_group }} owner={{ grits_user }} mode=0744
+    sudo: yes
+
+  - name: Install script to pipe mail to dashboard
+    template: src=parse_email.py dest=/etc/postfix/parse_email.py group={{ grits_group }} owner={{ grits_user }}
+    sudo: yes
+
+  - name: Run postmap on transport
+    command: postmap /etc/postfix/transport
+    sudo: yes
+
+  - name: Run postmap on aliases
+    command: postmap /etc/postfix/virtual_alias
+    sudo: yes
+
+  - name: Run postmap on access
+    command: postmap /etc/postfix/access
+    sudo: yes
+
+  - name: Restart postfix
+    command: service postfix restart
+    sudo: yes
+
+  - name: Restart dashboard process
+    supervisorctl: name="dashboard" state=restarted
+    when: dashboard.changed
+    sudo: yes
+
+  - name: Autocomplete collection
+    command: mongo .scripts/autocompleteCollections.js
+    args:
+      chdir: "{{ diagnostic_dashboard_prefix }}"
+    when: dashboard.changed

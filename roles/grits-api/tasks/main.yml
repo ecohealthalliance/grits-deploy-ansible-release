@@ -1,0 +1,168 @@
+---
+
+  - name: Install apt dependencies
+    apt: name={{ item }}
+    with_items:
+      - gfortran
+      - libopenblas-dev
+      - liblapack-dev
+      - lib32z1-dev
+      - zip
+      - unzip
+      - libxml2-dev
+      - libxslt1-dev
+    sudo: yes
+  
+  - name: Sync grits-api code
+    git: 
+      repo: git@github.com:ecohealthalliance/grits-api-release.git
+      dest: "{{ grits_api_prefix }}"
+      accept_hostkey: yes
+      version: "{{grits_api_git_version}}"
+    register: grits_api
+    
+  - name: Remove untracked files in grits-api directory
+    shell: "git clean -f"
+    args:
+      chdir: "{{ grits_api_prefix }}"
+    when: grits_api.changed
+
+  - name: Configure grits-api
+    template: src=config.py.j2 dest={{ grits_api_prefix }}/config.py
+
+  - name: Temp workaround for nltk install issue github.com/nltk/nltk/issues/824
+    pip: name=setuptools version=9.1 virtualenv={{ grits_env }}
+
+  - name: Install numpy
+    pip: name=numpy virtualenv={{ grits_env }}
+
+  - name: Install requirements
+    pip: requirements={{ grits_api_prefix }}/requirements.txt virtualenv={{ grits_env }}
+
+  # This should be added to requirements.txt
+  - name: Install nose
+    pip: name=nose virtualenv={{ grits_env }}
+
+  - name: Download nltk data
+    shell: "{{ grits_env }}/bin/python -c \"import nltk; nltk.download('{{ item }}')\" && echo done > .nltk_{{ item }}_downloaded"
+    args:
+      chdir: /home/{{ grits_user }}
+      creates: /home/{{ grits_user }}/.nltk_{{ item }}_downloaded
+    with_items:
+      - maxent_ne_chunker
+      - maxent_treebank_pos_tagger
+      - words
+      - punkt
+    sudo: yes
+    sudo_user: "{{ grits_user }}"
+    notify: restart grits api group
+
+  - name: Sync annie code
+    git: 
+      repo: git@github.com:ecohealthalliance/annie.git
+      dest: "{{ annie_prefix }}"
+      accept_hostkey: yes
+      version: "{{annie_git_version}}"
+    register: annie
+  
+  - name: Remove untracked files in annie directory
+    shell: "git clean -f"
+    args:
+      chdir: "{{ annie_prefix }}"
+    when: annie.changed
+  
+  # We tried using the pip module and creating a install file, but these create
+  # complications when annie is updated.
+  - name: Install annie
+    shell: "{{ grits_env }}/bin/python setup.py install"
+    args:
+      chdir: "{{ annie_prefix }}"
+    when: annie.changed
+    notify: restart grits api group
+
+  - name: Download geonames data
+    get_url: url=http://download.geonames.org/export/dump/allCountries.zip dest={{ annie_prefix }}/allCountries.zip
+
+  - name: Extract geonames zip
+    unarchive:
+      src: "{{ annie_prefix }}/allCountries.zip"
+      dest: "{{ annie_prefix }}"
+      copy: no
+      creates: "{{ annie_prefix }}/allCountries.txt"
+
+  - name: Import geonames database
+    shell: "{{ grits_env }}/bin/python mongo_import_geonames.py --mongo_url {{ mongo_url }} && echo done > .geonames.imported"
+    args:
+      chdir: "{{ annie_prefix }}"
+      # This approach might cause annie updates to trigger unnecessairy geonames updates.
+      creates: "{{ annie_prefix }}/.geonames.imported"
+    sudo: yes
+
+  - name: Copy ontologies pickle
+    copy: src=roles/grits-api/files/ontologies-0.1.3.p dest={{ grits_api_prefix }}/ontologies-0.1.3.p
+
+  - name: Copy keyword array pickle
+    copy: src=roles/grits-api/files/keyword_array.p dest={{ grits_api_prefix }}/keyword_array.p
+
+  - name: Copy dict vectorizer pickle
+    copy: src=roles/grits-api/files/dict_vectorizer.p dest={{ grits_api_prefix }}/dict_vectorizer.p
+
+  - name: Copy classifier pickle
+    copy: src=roles/grits-api/files/classifier.p dest={{ grits_api_prefix }}/classifier.p
+
+  - name: Restart tomcat7 to reclaim memory
+    ignore_errors: yes
+    service: name=tomcat7 state=restarted enabled=yes
+    sudo: yes
+
+  - name: Restart grits api group to reclaim memory
+    ignore_errors: yes
+    supervisorctl: name="gritsapigroup:" state=restarted
+    sudo: yes
+
+  - name: Load mongo keywords
+    shell: "{{ grits_env }}/bin/python mongo_import_keywords.py"
+    args:
+      chdir: "{{ grits_api_prefix }}"
+
+  - name: Install supervisord configs
+    template: src={{ item }}.conf.j2 dest=/etc/supervisor/conf.d/{{ item }}.conf
+    notify: reload supervisor
+    sudo: yes
+    with_items:
+      - celeryd
+      - gritsapid
+
+  - name: Install flower supervisord config
+    template: src=flowerd.conf.j2 dest=/etc/supervisor/conf.d/flowerd.conf
+    notify: reload supervisor
+    sudo: yes
+    when: flower_password != ""
+
+  - name: Copy cron script
+    template:
+      src: diagnose_girder_HM_articles.j2
+      dest: "{{ cron_prefix }}/diagnose_girder_HM_articles"
+      group: "{{ grits_group }}"
+      owner: "{{ grits_user }}"
+      mode: 0755
+
+  - name: Install healthmap diagnosis cron job
+    cron:
+      name: "Diagnose healthmap articles"
+      user: "{{ grits_user }}"
+      job: "{{ cron_prefix }}/diagnose_girder_HM_articles"
+      day: 26
+      hour: 3
+      minute: 0
+    when: run_cron_jobs
+
+  - name: Creating cron job that restarts processes in order to free memory
+    sudo: yes
+    cron:
+      name: "Restart processes"
+      user: "root"
+      job: "service tomcat7 restart ; supervisorctl restart gritsapigroup:celery_diagnose"
+      hour: 3
+      minute: 0
+    when: run_cron_jobs

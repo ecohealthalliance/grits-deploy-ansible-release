@@ -1,0 +1,5 @@
+.*.swp
+*.py[cod]
+.vagrant
+.ansible
+grits-bundle.tar.gz

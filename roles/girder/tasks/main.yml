@@ -1,0 +1,168 @@
+---
+
+  - name: Install dependencies from apt
+    apt: name={{ item }}
+    with_items:
+      - python2.7
+      - python2.7-dev
+      - build-essential
+      - python-software-properties
+      - libffi-dev
+
+  - name: Update pip
+    pip: name=pip extra_args=-U
+    sudo: yes
+    sudo_user: root
+
+  - name: Sync girder code
+    git: 
+      repo: git@github.com:girder/girder.git
+      dest: /opt/girder
+      accept_hostkey: yes
+      version: "{{girder_git_version}}"
+    register: girder
+  
+  - name: Remove untracked files in girder directory
+    shell: "git clean -f"
+    args:
+      chdir: /opt/girder
+    when: girder.changed
+
+  - name: Sync gritsSearch code
+    git: 
+      repo: git@github.com:ecohealthalliance/gritsSearch.git
+      dest: /opt/girder/plugins/gritsSearch
+      accept_hostkey: yes
+      version: "{{gritsSearch_git_version}}"
+    register: gritsSearch
+
+  - name: Remove untracked files in gritsSearch directory
+    shell: "git clean -f"
+    args:
+      chdir: /opt/girder/plugins/gritsSearch
+    when: gritsSearch.changed
+
+  - name: Set girder directory ownership to grits user
+    shell: "chown -R {{ grits_user }} /opt/girder"
+    #when: gritsSearch.changed
+
+  - name: Install python requirements
+    pip: requirements=/opt/girder/requirements.txt virtualenv=/opt/girder/env
+    sudo: yes
+    sudo_user: "{{ grits_user }}"
+
+  - name: Install grits plugin requirements
+    pip: requirements=/opt/girder/plugins/gritsSearch/requirements.txt virtualenv=/opt/girder/env
+    sudo: yes
+    sudo_user: "{{ grits_user }}"
+
+  - name: Install celery plugin requirements
+    pip: requirements=/opt/girder/plugins/celery_jobs/requirements.txt virtualenv=/opt/girder/env
+    sudo: yes
+    sudo_user: "{{ grits_user }}"
+
+  - name: Install geospatial plugin requirements
+    pip: requirements=/opt/girder/plugins/geospatial/requirements.txt virtualenv=/opt/girder/env
+    sudo: yes
+    sudo_user: "{{ grits_user }}"
+
+  - name: Install metadata_extractor plugin requirements
+    pip: requirements=/opt/girder/plugins/metadata_extractor/requirements.txt virtualenv=/opt/girder/env
+    sudo: yes
+    sudo_user: "{{ grits_user }}"
+
+  - name: Install grunt globally
+    npm: name={{ item }} global=yes
+    with_items:
+      - grunt
+      - grunt-cli
+    sudo: yes
+    sudo_user: root
+
+  - name: Install local npm requirements
+    npm: path=/opt/girder production=yes
+
+  - name: Create girder config
+    template: src=girder.local.cfg.j2 dest=/opt/girder/girder/conf/girder.local.cfg
+
+  - name: Run grunt init
+    shell: grunt init && echo done > /opt/girder/.grunt_init_done
+    args:
+      chdir: /opt/girder
+      creates: /opt/girder/.grunt_init_done
+
+  - name: Run grunt
+    shell: grunt && echo done > /opt/girder/.grunt_done
+    args:
+      chdir: /opt/girder
+      creates: /opt/girder/.grunt_done
+
+  - name: Make log directory user writeable
+    file: path=/opt/girder/logs group={{ grits_group }} owner={{ grits_user }} state=directory
+
+  - name: Compile python modules
+    shell: /opt/girder/env/bin/python -m compileall /opt/girder && echo done > /opt/girder/.python_compiled
+    args:
+      creates: /opt/girder/.python_compiled
+
+  - name: Configure supervisord to manage girder
+    template: src=girderd.conf.j2 dest=/etc/supervisor/conf.d/girderd.conf
+
+  # maybe a better way to do this, but we need supervisor to be reloaded now,
+  # handlers run at the end
+  - include: ../../common/handlers/main.yml
+
+  - name: Create admin grits user
+    shell: "curl --data \"login=grits&firstName=grits&lastName=grits&password={{girder_admin_password}}&email={{girder_admin_email}}\" http://{{girder_socket_host}}:{{girder_socket_port}}/api/v1/user"
+
+  - name: Log in as grits
+    shell: "curl -u grits:{{girder_admin_password}} http://{{girder_socket_host}}:{{girder_socket_port}}/api/v1/user/authentication"
+    register: token
+
+  - name: Enable grits plugin
+    shell: "curl -X PUT --data 'plugins={{girder_plugins|to_json}}&token={{(token.stdout|from_json).authToken.token}}' http://{{girder_socket_host}}:{{girder_socket_port}}/api/v1/system/plugins"
+    register: plugin
+    notify: reload supervisor
+    with_items:
+      - girder
+
+  - name: Copy healthmap import python script
+    template:
+      src: healthMapGirder.py
+      dest: "{{ cron_prefix }}/healthMapGirder.py"
+      group: "{{ grits_group }}"
+      owner: "{{ grits_user }}"
+
+  - name: Run full import once
+    shell: ". $HOME/grits_config && PYTHONPATH=/opt/girder:$PYTHONPATH /opt/girder/env/bin/python {{ cron_prefix }}/healthMapGirder.py --full"
+    sudo: yes
+    sudo_user: grits
+
+  - name: Copy cron scripts
+    template:
+      src: "{{ item }}.j2"
+      dest: "{{ cron_prefix }}/{{ item }}"
+      group: "{{ grits_group }}"
+      owner: "{{ grits_user }}"
+      mode: 0755
+    with_items:
+      - dump_girder_to_s3
+      - hm_import
+
+  - name: Install healthmap update cron job
+    cron:
+      name: "Update healthmap data"
+      user: "{{ grits_user }}"
+      job: "{{ cron_prefix }}/hm_import"
+      hour: 1
+      minute: 0
+    when: run_cron_jobs
+
+  - name: Install girder dump cron job
+    cron:
+      name: "Dump girder data"
+      user: "{{ grits_user }}"
+      job: "{{ cron_prefix }}/dump_girder_to_s3"
+      hour: 5
+      minute: 0
+    when: run_cron_jobs
