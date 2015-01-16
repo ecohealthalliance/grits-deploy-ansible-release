@@ -6,28 +6,32 @@
 # girder_data_access_key: ...
 # girder_data_secret_key: ...
 
-# Info for grits admin account that will be set up for the Girder database
+# Info for grits admin account for the Girder database. This will be set up on the first deployment. Once you've deployed to a server, it can't be changed from here.
 girder_admin_email: example@example.com
-girder_admin_password: ...
+# The password must be at least 6 characters
+girder_admin_password: example
 
-# API key from HealthMap, providing access to the past 2 years of data
+# API key from HealthMap, providing access to the past 2 years of data. Must be obtained from HealthMap.
 healthmap_apikey: ...
 
-# Optional: Bing translate account information, used to translate foreign language articles
+# Optional: Bing translate account information, used to translate foreign language articles. Must be obtained from Bing translate.
 # bing_translate_id: ...
 # bing_translate_secret: ...
 
-# SSH key for a GitHub user with access to the repositories that will be installed
-git_key: ...
+# SSH key for a GitHub user with access to the repositories that will be installed. Must be created and added to GitHub. The key can't have a passphrase, because it is used with no user input.
+git_key: |
+  -----BEGIN RSA PRIVATE KEY-----
+  ...
+  -----END RSA PRIVATE KEY-----
 
-# Account that will be set up for flower
+# Account that will be set up for flower. This will be set up, can be anything. 
 flower_user: ...
 flower_password: ...
 
-# API key that will be set up for the GRITS diagnostic API
+# API key that will be set up for the GRITS diagnostic API. This will be set up, can be anything. 
 grits_api_key: ...
 
-# SSL certificates
+# SSL certificates. For production, enter your certificates here. For dev, leave them empty or use a self-signed certificate.
 apache_crt: |
   -----BEGIN CERTIFICATE-----
   ...
